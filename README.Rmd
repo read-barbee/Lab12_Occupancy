@@ -1,0 +1,671 @@
+---
+title: "Lab 12"
+author: "Mark Hebblewhite"
+date: "2023-04-10"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r eval=TRUE, message=FALSE, results='hide',warning=FALSE}
+#function to install and load required packages
+ipak <- function(pkg){
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg)) 
+    install.packages(new.pkg, dependencies = TRUE)
+  sapply(pkg, require, character.only = TRUE)
+}
+
+
+packages <- c("unmarked", "reshape2", "dplyr", "ggplot2","AICcmodavg")
+
+#run function to install packages
+ipak(packages)
+```
+
+
+Follow this link: [unmarked](https://cran.r-project.org/web/packages/unmarked/vignettes/unmarked.pdf) for package vignette
+
+
+
+############################################################
+## 1.0 Frog Data Set Warm Up
+
+```{r}
+pcru <- csvToUMF(system.file("csv", "frog2001pcru.csv", package = "unmarked"),long = TRUE, type = "unmarkedFrameOccu")
+head(pcru)
+summary(pcru)
+```
+
+There are 130 sites: 
+ - Maximum number of observations per site: 3 
+ - Mean number of observations per site: 2.59 
+ - Sites with at least one detection: 96 
+
+```{r}
+# Scale
+obsCovs(pcru) <- scale(obsCovs(pcru))
+```
+
+### Fit occupancy models using occu function
+
+```{r}
+# model 1: p(.)psi(.)
+ex_mod_p1 <- occu(~ 1 ~ 1, data = pcru)
+ex_mod_p1
+
+# model 2: p(MinAfterSunset,Temperature)psi(.)
+ex_mod_p2 <- occu(~ MinAfterSunset + Temperature ~ 1, data = pcru)
+ex_mod_p2
+```
+
+### Visualize parameters
+
+Variables can be back-transformed to the unconstrained scale using `backTransform` (Standard errors are computed using the delta method.)
+
+```{r}
+backTransform(ex_mod_p1, "state")
+backTransform(ex_mod_p1, "det")
+
+
+backTransform(ex_mod_p2, "state")
+```
+
+Because the detection component was modeled with covariates, covariate coefficients must be specified to back-transform. Here, we request the probability of detection given a site is occupied and all covariates are set to 0.
+
+```{r}
+backTransform(linearComb(ex_mod_p2, coefficients = c(0, 0, -1), type = "det"))
+```
+
+Next, we remind ourselves of the data to create predictions for specific ranges of values
+
+```{r}
+head(getData(ex_mod_p2))
+newData <- data.frame(MinAfterSunset = 0, Temperature = -2:2)
+head(newData)
+predict(ex_mod_p2, type = "det", newdata = newData, appendData = TRUE)
+predicted.data <- predict(ex_mod_p2, type = "det", newdata = newData, appendData = TRUE)
+```
+
+Rough plot of predicted probability of Occupancy as a function of Temperature
+
+```{r}
+ggplot(predicted.data, aes(Temperature, Predicted)) + stat_smooth(method="glm", method.args = list(family="binomial"), level = 0.5)
+```
+
+### Model Selection 
+
+First, Organize models into a list
+```{r}
+fit.mlist <-fitList(fits=list('p.psi' = ex_mod_p1,'pMinAfterSunset_Temp_psi' = ex_mod_p2))
+```
+
+Then, display the comparison using the unmarked function "modSel"
+```{r}
+modSel(fit.mlist, nullmod = "p.psi")
+```
+
+The next two unmarked functions are for model averaging
+
+### Model averaging basics
+
+```{r}
+coef(fit.mlist)
+SE(fit.mlist)
+frogPsi_m2 <-predict(fit.mlist, type="state") # occupancy
+mean(frogPsi_m2$Predicted)
+```
+
+So how many sites predicted to be occupied? Recall there were 130 sites, and 96 minimum detections
+
+```{r}
+Naive = 96
+Psi = 130*mean(frogPsi_m2$Predicted)
+Psi - Naive
+```
+
+We predicted 10.99 more sites would have frogs than detected. 
+
+### Detection Probability
+
+```{r}
+frogP_m2 <-predict(fit.mlist, type="det") # detection probability
+hist(frogP_m2$Predicted)
+summary(frogP_m2)
+
+
+fitstats <- function(fm) {
+  observed <- getY(fm@data)
+  expected <- fitted(fm)
+  resids <- residuals(fm)
+  sse <- sum(resids^2)
+  chisq <- sum((observed - expected)^2 / expected)
+  freeTuke <- sum((sqrt(observed) - sqrt(expected))^2)
+  out <- c(SSE=sse, Chisq=chisq, freemanTukey=freeTuke)
+  return(out)
+}
+```
+
+### Test of model fit: parametric bootstrap 
+
+```{r warning=FALSE}
+load("Data/elkforheb.RData") ##loads functions chisq and Nocc used in parboot statistics
+
+pcru.pb <- parboot(ex_mod_p2, statistics = chisq, nsim = 50)
+pcru.pb
+plot(pcru.pb)
+
+
+pcru.pb <- parboot(ex_mod_p2, Nocc, nsim = 50)
+pcru.pb
+plot(pcru.pb)
+abline(v=96, col="red")
+
+```
+
+
+## 2. Occupancy Data - Elk
+
+We will use the elk data loaded in the previous step `load("Data/elkforheb.RData")`. 
+
+```{r}
+#load("Data/elkforheb.RData") 
+ls()
+str(ydata)
+str(sp)
+str(covar)
+
+ggplot(covar, aes(easting, northing)) + geom_point()
+```
+
+### Map data
+ 1. make covar a sp points object
+ 2. Import shapefiles
+ 3. Plot using shapefiles
+ 4. Plot using mapview. 
+
+
+###  Scale numeric variables and set other variables to factors
+```{r}
+new_covar <- covar %>%
+  mutate(northness = cos(aspect90m)) %>%
+  mutate(eastness = sin(aspect90m)) %>%
+  rename(elev =dem90m) %>%
+  mutate(elev2 = elev*elev) %>%
+  mutate_if(is.integer, as.character) %>%
+  mutate_if(is.character, as.factor) %>%
+  mutate_if(is.numeric, scale)
+
+sel_cov <- new_covar %>%
+  dplyr::select('northness', 'eastness', 'slope' = 'slope90m', 'elev',
+                'elev2', 'd2road', 'tpi20', 'tpi100', 'tpi500', 'cc500', 'cc100', 'burns20','burns100', 'burns500', 'regen20', 'regen100', 'regen500', 'cuts20','cuts100', 'cuts500', 'NDVIAug500', 'NDVIAug20', 'NDVIJul500', 'NDVIJul100','NDVIJul20', 'NDVIAug100', 'dhicum20', 'dhicum100', 'dhicum500', 'dhimin20','dhimin100', 'dhimin500', 'dhiseas20', 'dhiseas100', 'dhiseas500', 'lure','protected2', 'protected3', 'trailtype',	'camera','ppltot', 'pplcat3a', 'pplcat3b', 'pplcat3c', 'pplcat5','motortot', 'motorcat3a', 'motorcat3b', 'motorcat3c', 'motorcat5','allhumantot', 'allhumancat3a', 'allhumancat3b', 'allhumancat3c','allhumancat5', 'pplcat2a', 'pplcat2b', 'pplcat2c', 'pplcat2d', 'motorcat2a','motorcat2b', 'motorcat2c', 'motorcat2d', 'allhumancat2a', 'allhumancat2b','allhumancat2c', 'allhumancat2d')
+
+elk_cov <- sel_cov %>%
+  dplyr::select('elev', 'slope', 'cuts100', 'pplcat3a',  'lure', 'camera') %>%
+  mutate_if(is.numeric, scale)
+```
+
+###  Prep EH and unmarked data object
+
+Convert to 7-day intervals
+
+```{r}
+#str(ydata) ## Note there are both NAs and 0s
+ydata7 <- convert(ydata, 7)
+ydata7 <- count2occu(ydata7) # makes sure occupancy data, not count
+
+# Generate data in unmarked foramt
+umf <- unmarkedFrameOccu(y = ydata7[,-1], siteCovs = sel_cov) 
+summary(umf)
+
+
+
+summary(umf)
+```
+
+### Run models p
+
+```{r}
+fm_p1 <- occu(~1 ~1, data=umf)
+#summary(fm_p1)
+fm_p2 <- occu(~d2road ~1, data=umf)
+fm_p3 <- occu(~tpi20 ~1, data=umf)
+fm_p4 <- occu(~tpi100 ~1, data=umf)
+fm_p5 <- occu(~tpi500 ~1, data=umf)
+fm_p6 <- occu(~cc500 ~1, data=umf)
+fm_p7 <- occu(~cc100 ~1, data=umf)
+fm_p8 <- occu(~lure ~1, data=umf)
+fm_p9 <- occu(~protected3 ~1, data=umf)
+fm_p10 <- occu(~camera ~1, data=umf)
+fm_p11 <- occu(~pplcat3a ~1, data=umf)
+fm_p12 <- occu(~motorcat3a ~1, data=umf)
+fm_p13 <- occu(~motorcat5 ~1, data=umf)
+fm_p14 <- occu(~allhumancat5 ~1, data=umf)
+fm_p15 <- occu(~pplcat2a ~1, data=umf)
+fm_p16 <- occu(~motorcat2a ~1, data=umf)
+fm_p17 <- occu(~allhumancat2a ~1, data=umf)
+```
+
+### Model selection Det Prob  
+
+```{r}
+fms.all.p <- fitList(fits=list('psi(.)p(.)'=fm_p1, 'psi(.)p(d2road)'=fm_p2,'psi(.)p(tpi20)'=fm_p3,'psi(.)p(tpi100)'=fm_p4,'psi(.)p(tpi500)'=fm_p5,'psi(.)p(cc500.s)'=fm_p6,'psi(.)p(cc100)'=fm_p7,'psi(.)p(lure)'=fm_p8,'psi(.)p(protected3)'=fm_p9,'psi(.)p(camera)'=fm_p10,'psi(.)p(pplcat3a)'=fm_p11,'psi(.)p(motorcat3a)'=fm_p12,'psi(.)p(motorcat5)'=fm_p13,'psi(.)p(allhumancat5)'=fm_p14,'psi(.)p(pplcat2a)'=fm_p15,'psi(.)p(motorcat2a)'=fm_p16,'psi(.)p(allhumancat2a)'=fm_p17))
+
+modSel(fms.all.p)
+```
+
+Wow, so protected areas with 2 categories seems to be the top.
+
+```{r}
+summary(fm_p9)
+```
+
+Top model:
+
+```{r}
+top_p=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~1, data=umf)
+summary(top_p)
+```
+
+
+### Run models psi/p
+
+```{r}
+fm1=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~1, data=umf)
+fm2=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~northness, data=umf)
+fm3=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~eastness, data=umf)
+fm4=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~slope, data=umf)
+fm5=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~elev, data=umf)
+fm6=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~elev +elev2, data=umf)
+fm7=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~d2road, data=umf)
+fm8=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~tpi20, data=umf)
+fm9=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~tpi100, data=umf)
+fm10=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~tpi500, data=umf)
+fm12=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~cc500, data=umf)
+fm13=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~cc100, data=umf)
+fm14=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~burns20, data=umf)
+fm15=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~burns100, data=umf)
+fm16=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~burns500, data=umf)
+fm17=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~regen20, data=umf)
+fm18=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~regen100, data=umf)
+fm19=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~regen500, data=umf)
+fm20=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~cuts20, data=umf)
+fm21=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~cuts100, data=umf)
+fm22=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~cuts500, data=umf)
+fm23=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~NDVIAug500, data=umf)
+fm24=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~NDVIAug20, data=umf)
+fm25=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~NDVIJul500, data=umf)
+fm26=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~NDVIJul100, data=umf)
+fm27=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~NDVIJul20, data=umf)
+fm28=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~NDVIAug100, data=umf)
+fm29=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~dhicum20, data=umf)
+fm30=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~dhicum100, data=umf)
+fm31=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~dhicum500, data=umf)
+fm32=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~dhimin20, data=umf)
+fm33=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~dhimin100, data=umf)
+fm34=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~dhimin500, data=umf)
+fm35=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~dhiseas20, data=umf)
+fm36=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~dhiseas100, data=umf)
+fm37=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~dhiseas500, data=umf)
+fm38=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~protected2, data=umf)
+fm39=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~protected3, data=umf)
+fm40=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~pplcat5, data=umf)
+```
+
+### Model List
+
+```{r}
+fms.all.psi <- fitList(fits=list('psi(1)p(...)'=fm1,'psi(northness)p(...)'=fm2,'psi(eastness)p(...)'=fm3,'psi(slope)p(...)'=fm4,'psi(elev)p(...)'=fm5,'psi(elev+elev2)p(...)'=fm6,'psi(d2road)p(...)'=fm7,'psi(tpi20)p(...)'=fm8,'psi(tpi100)p(...)'=fm9,'psi(tpi500)p(...)'=fm10, 'psi(cc500)p(...)'=fm12,'psi(cc100)p(...)'=fm13,'psi(burns20)p(...)'=fm14,'psi(burns100)p(...)'=fm15,'psi(burns500)p(...)'=fm16,'psi(regen20)p(...)'=fm17,'psi(regen100)p(...)'=fm18,'psi(regen500)p(...)'=fm19,'psi(cuts20)p(...)'=fm20,'psi(cuts100)p(...)'=fm21,'psi(cuts500)p(...)'=fm22,'psi(NDVIAug500)p(...)'=fm23,'psi(NDVIAug20)p(...)'=fm24,'psi(NDVIJul500)p(...)'=fm25,'psi(NDVIJul100)p(...)'=fm26,'psi(NDVIJul20)p(...)'=fm27,'psi(NDVIAug100)p(...)'=fm28,'psi(dhicum20)p(...)'=fm29,'psi(dhicum100)p(...)'=fm30,'psi(dhicum500)p(...)'=fm31,'psi(dhimin20)p(...)'=fm32,'psi(dhimin100)p(...)'=fm33,'psi(dhimin500)p(...)'=fm34,'psi(dhiseas20)p(...)'=fm35,'psi(dhiseas100)p(...)'=fm36,'psi(dhiseas500)p(...)'=fm37,'psi(protected2)p(...)'=fm38,'psi(protected3)p(...)'=fm39,'psi(pplcat5)p(...)'=fm40))
+modSel(fms.all.psi)
+```
+
+```{r}
+# psi top 
+occu(~protected3 + pplcat5 + tpi20 + camera +cc100 ~elev + elev2 + pplcat5 + dhiseas20 + NDVIJul20 + dhicum20 + cuts500 + burns500 + slope, data=umf) # neither burns, dhi's, nor elevation really significant
+
+occu(~protected3 + pplcat5 + tpi20 + camera +cc100 ~elev + pplcat5 + NDVIJul20 + cuts500 + burns500 + slope, data=umf) # neither burns, dhi's, nor elevation really significant
+
+# top model
+top_fm=occu(~protected3 + pplcat5 + tpi20 + camera +cc100 ~elev + pplcat5 + NDVIJul20 + cuts500 + burns500 + slope, data=umf)
+top_fm
+```
+
+### Post-Estimation Commands in Occupancy Models 
+
+Obtaining Confidence Intervals by Likelihood Profile - takes time. 
+
+```{r}
+## Detection Covariates
+confint(top_fm, type="det", method = "profile") # to get CI around any beta coeff
+## Psi
+confint(top_fm, type="state", method = "profile") # to get CI around any beta coeff
+```
+
+### Evaluating model fit 
+
+```{r}
+(system.time(pb <- parboot(top_fm, statistic=chisq, nsim=100, report=10))) # if p>0.05, fail to reject null, and model fit is good
+pb # p=
+plot(pb)
+```
+
+
+### Best estimate of which site are occupied
+
+```{r}
+?ranef
+
+ELKranef = ranef(top_fm)
+str(ELKranef)
+hist(ELKranef@post)
+head(ELKranef@post)
+
+summary.y2=as.data.frame(t(apply(ydata7[,-1],1,na01.fnc)))
+ELKoccu=cbind(data.frame(location=ydata7$location, easting=covar$easting, northing=covar$northing), summary.y2, data.frame(ELKpsi=ELKranef@post[,2,], ranefmode=bup(ELKranef , stat="mode"), ranefmean=bup(ELKranef , stat="mean")))
+sum(ELKoccu$psinaive) # 250/698 = 
+sum(ELKoccu$ranefmode) # 255/698 = 
+sum(ELKoccu$ranefmean) # 276.6746/698 = 
+Nocc(top_fm)
+
+head(ELKoccu)
+```
+
+Plot Naive Detections:
+```{r}
+ggplot(ELKoccu, aes(easting, northing, colour =psinaive, size = psinaive)) + geom_point()
+```
+
+Plot Estimated Occupancy:
+
+```{r}
+ggplot(ELKoccu, aes(easting, northing, colour =ELKpsi, size = ELKpsi)) + geom_point()
+
+ggplot(ELKoccu, aes(easting, northing, colour =ELKpsi, size = as.factor(psinaive))) + geom_point()
+```
+
+### Obtaining Confidence Interval on Estimated number of sites occupied 
+
+From Kery/Royle workshop 9...doc FINITE SAMPLE OCCUPANCY
+Nocc function now in source.r
+
+```{r}
+estimate.of.Nocc <- Nocc(top_fm)
+estimate.of.Nocc #same as sum(ranefmean)
+system.time(pb.N <- parboot(top_fm, Nocc, nsim=100, report=10))   
+# 100 Takes less  time (7min for 1000)
+plot(pb.N)
+abline(v=250, col="red")
+summary(pb.N@t.star) #again same as sum(ranefmean)
+quantile(pb.N@t.star, prob = c(0.025, 0.975)) #435.5439 494.5864
+```
+
+### Prediction with Occupancy Model
+```{r}
+summary(top_fm)
+```
+
+Predict with averages (most 0 because scaled) must be more in 
+fit simple model for now
+
+```{r}
+fm_temp=occu(~lure + camera ~elev, data=umf)
+newData=data.frame("elev"=0, "lure"=1, "camera"="flash")
+predict(fm_temp, type = 'state', newdata = newData)
+```
+
+## 3.0 Beyond Occupancy: Models of Counts
+
+From [Mike Conroy Workshop](https://sites.google.com/site/asrworkshop/home/schedule/r-occupancy-1).
+
+We will illustrate the setup of an occupancy analysis with data for Blue Grosbeaks (Guiraca caerulea) on 41 old fields planted to longleaf pines (Pinus palustris) in southern Georgia, USA.  Surveys were 500 m transects across each field and were completed three times during the breeding season in 2001.  The data are located in a comma-delimited text file. The first column (which is optional) is a label for each site, simple numbered 1 - 41.  The next 3 columns are the detection histories for each site on each of 3 occasions during the 2001 breeding season.    For now we are going to ignore the covariates and other information in the spreadsheet, and focus on the encounter histories for each site (columns B, C, and D starting in row 3 and running to row 43 (41 sites total). 
+
+```{r}
+#rm(list=ls())
+data<-read.csv("Data/blgr.csv")
+head(data)
+hist(data$Count1)
+hist(data$Count2)
+hist(data$Count3)
+```
+
+Detection data rows are sites columns are detection replicates, which focus only on occupancy 1, 0 in the R-N model
+
+```{r}
+y<-data[,2:4]
+n<-nrow(data)
+#site level (individual) covariates
+blgr.site<-data[,5:9]
+```
+
+
+Create time factor and use as covariate.
+Observation level (time specific) covariates:
+
+```{r}
+time<-as.factor(rep(c(1,2,3),n))
+blgr.obs<-data.frame(time)
+```
+
+Put everything together in unmarked data frame. Note that covariate can come from separate files
+
+```{r}
+blgr <- unmarkedFrameOccu(y = y, siteCovs = blgr.site,obsCovs=blgr.obs)
+#summary of unmarked data frame
+summary(blgr)
+head(blgr)
+```
+
+
+### CREATING MODELS
+Royle-Nichols model with no covariates
+
+J. A. Royle and J. D. Nichols. Estimating abundance from repeated presence-absence data or point counts. Ecology, 84(3):777-790, 2003)
+
+Fit the occupancy model of Royle and Nichols (2003), which relates probability of detection of the species to the number of individuals available for detection at each site. Probability of occupancy is a derived parameter: the probability that at least one individual is available for detection at the site.
+
+```{r}
+?occuRN
+rn1<-occuRN(~1 ~1,blgr, K=150)
+summary(rn1)
+```
+
+
+Back transformations
+
+```{r}
+backTransform(rn1,'det')
+backTransform(rn1,"state")
+```
+
+
+So the raw P is 0.22, the estimated N per site is 3.05, and there are 41 sites, or 125.05 blgr at each site. 
+
+### Empirical Bayes estimates of abundance at each site
+
+```{r}
+re <- ranef(rn1)
+plot(re)
+ebup <- bup(re, stat="mean")
+rn1EBUP <- sum(ebup)
+rn1_CI <- confint(re,level=0.95)
+rn1_CI
+```
+
+Create some more occupancy models
+
+Time specific detection, constant occupancy: 
+```{r}
+#time specific detection, constant occupancy 
+rn2<-occuRN(~time ~1,blgr)
+backTransform(rn2,"state")
+```
+
+Constant detection, abundance predicted by bqi:
+
+```{r}
+rn3<-occuRN(~1 ~BQI.1.yes,blgr)
+summary(rn3)
+backTransform(linearComb(rn3, c(1, 0), type="state"))
+backTransform(linearComb(rn3, c(0, 1), type="state"))
+predict(rn3, type ="state")
+```
+Note the additive linear terms.
+
+Detection as a function of time, abundance ~ Bq1:
+```{r}
+rn4<-occuRN(~time ~BQI.1.yes,blgr)
+summary(rn4)
+```
+
+Detection as a function of time, abundance ~ Bq1 and Crop:
+```{r}
+rn5 <-occuRN(~time ~BQI.1.yes + Crop.history, blgr)
+summary(rn5)
+
+rn5AIC <-rn5@AIC
+rn4AIC <- rn4@AIC
+rn3AIC <- rn3@AIC
+rn2AIC <- rn2@AIC
+rn1AIC <- rn1@AIC
+```
+
+```{r}
+modelsAIC <- c(rn1AIC, rn2AIC, rn3AIC, rn4AIC, rn5AIC)
+modelsAIC
+```
+
+The fact that `rn1` is the best is uninformative. Let's do something with model rn3
+
+```{r}
+predict(rn3, type ="state")
+
+N_rn3 <- predict(rn3, type = "state")
+str(N_rn3)
+hist(N_rn3$Predicted)
+
+re5 <- ranef(rn5)
+plot(re5)
+```
+
+### COUNT MODELS N-Mixture Models, e.g., Point Counts
+
+J. A Royle. N-mixture models for estimating population size from spatially replicated counts. Biometrics , 60(1):108-115, 2004
+
+```{r}
+data2<-read.csv("Data/blgr.csv")
+head(data2)
+```
+
+Detection data rows are sites columns are detection replicates
+
+```{r}
+counts<-data2[,10:12]
+hist(counts$Count1)
+n<-nrow(data2)
+```
+
+Site level (individual) covariates:
+```{r}
+blgr_count.site<-data2[,5:9]
+```
+
+Create time factor and use as covariate
+
+Observation level (time specific) covariates:
+```{r}
+time<-as.factor(rep(c(1,2,3),n))
+blgr.obs<-data.frame(time)
+```
+
+Observation level (time specific) covariates:
+```{r}
+blgr_count.obs<-data.frame(time)
+```
+
+Put everything together in unmarked data frame. Note that covariate can come from separate files
+```{r}
+blgr_count <- unmarkedFramePCount(y = counts, siteCovs = blgr_count.site,obsCovs=blgr_count.obs)
+summary(blgr_count)
+```
+
+### CREATING MODELS
+Royle count model with no covariates
+
+```{r}
+pc1<-pcount(~1 ~1,blgr_count, K = 500)
+pc1
+
+backTransform(pc1,"state")
+backTransform(pc1,"det")
+
+sum(counts$Count1)
+```
+
+### Goodness of Fit test with AICcmodavg
+
+```{r}
+Nmix.gof.test(pc1, nsim = 50, plot.hist = TRUE)
+```
+
+Time specific:
+```{r}
+pc2<-pcount(~time ~1,blgr_count, K = 150)
+backTransform(pc2,"state")
+Nmix.gof.test(pc2, nsim = 50, plot.hist = TRUE)
+```
+
+Complex models:
+```{r}
+pc3<-pcount(~time ~ Field.size,blgr_count, K = 150)
+pc4<-pcount(~time ~BQI.1.yes, blgr_count, K = 150)
+pc5<-pcount(~time ~Crop.history, blgr_count, K = 150)
+```
+
+Model Selection:
+```{r}
+pc5AIC <-pc5@AIC
+pc4AIC <- pc4@AIC
+pc3AIC <- pc3@AIC
+pc2AIC <- pc2@AIC
+pc1AIC <- pc1@AIC
+
+modelsAIC <- c(pc1AIC, pc2AIC, pc3AIC, pc4AIC, pc5AIC)
+pc5
+```
+
+Now need to do backtransformations for each of the 4 classes of the Crop History Mixed
+
+For the Intercept value:
+```{r}
+backTransform(linearComb(pc5, coefficients = c(1, 0, 0, 0), type="state"))
+```
+
+Crop history = grass
+```{r}
+backTransform(linearComb(pc5, coefficients = c(0, 0, 1, 0), type="state"))
+```
+
+Prediction:
+```{r}
+NmixPred <- predict(pc5, type = "state")
+hist(NmixPred$Predicted)
+```
+
+### Fitting Occupancy Model to 'count' data
+
+```{r}
+blgr_occm1 <- occu(~time ~Crop.history, data = blgr)
+blgr_occm1
+backTransform(linearComb(blgr_occm1, coefficients = c(1, 0, 0, 0),type="state"))
+blgrPsi <- predict(blgr_occm1, type="state")
+
+## Bind
+blgr_Pred <- rbind(NmixPred$Predicted, N_rn3$Predicted)
+plot(NmixPred$Predicted ~N_rn3$Predicted)
+```
+
+```{r eval=FALSE, include=FALSE}
+knitr::purl(input = "README.Rmd", output = "lab12.R", documentation = 1)
+```
