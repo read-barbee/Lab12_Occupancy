@@ -10,23 +10,30 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ```{r eval=TRUE, message=FALSE, results='hide',warning=FALSE}
-#function to install and load required packages
-ipak <- function(pkg){
-  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
-  if (length(new.pkg)) 
-    install.packages(new.pkg, dependencies = TRUE)
-  sapply(pkg, require, character.only = TRUE)
-}
+# #function to install and load required packages
+# ipak <- function(pkg){
+#   new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+#   if (length(new.pkg)) 
+#     install.packages(new.pkg, dependencies = TRUE)
+#   sapply(pkg, require, character.only = TRUE)
+# }
+# 
+# 
+# packages <- c("unmarked", "reshape2", "dplyr", "ggplot2","AICcmodavg")
+# 
+# #run function to install packages
+# ipak(packages)
 
+library(unmarked)
+library(reshape2)
+library(dplyr)
+library(ggplot2)
+library(AICcmodavg)
 
-packages <- c("unmarked", "reshape2", "dplyr", "ggplot2","AICcmodavg")
-
-#run function to install packages
-ipak(packages)
 ```
 
 
-Follow this link: [unmarked](https://cran.r-project.org/web/packages/unmarked/vignettes/unmarked.pdf) for package vignette
+Follow this link: [unmarked](https://cran.r-project.org/web/packages/unmarked/vignettes/unmarked.html) for package vignette
 
 
 
@@ -34,6 +41,7 @@ Follow this link: [unmarked](https://cran.r-project.org/web/packages/unmarked/vi
 ## 1.0 Frog Data Set Warm Up
 
 ```{r}
+#import and convert to unmarked data frame object
 pcru <- csvToUMF(system.file("csv", "frog2001pcru.csv", package = "unmarked"),long = TRUE, type = "unmarkedFrameOccu")
 head(pcru)
 summary(pcru)
@@ -42,7 +50,8 @@ summary(pcru)
 There are 130 sites: 
  - Maximum number of observations per site: 3 
  - Mean number of observations per site: 2.59 
- - Sites with at least one detection: 96 
+ - Sites with at least one detection: 96
+ NAIVE OCCUPANCY = 96/130 = 0.73 (assuming detection = 1)
 
 ```{r}
 # Scale
@@ -52,8 +61,8 @@ obsCovs(pcru) <- scale(obsCovs(pcru))
 ### Fit occupancy models using occu function
 
 ```{r}
-# model 1: p(.)psi(.)
-ex_mod_p1 <- occu(~ 1 ~ 1, data = pcru)
+# model 1: p(.)psi(.): constant model. No covariates
+ex_mod_p1 <- occu(~ 1 ~ 1, data = pcru) #classic MacKenzie Occu model
 ex_mod_p1
 
 # model 2: p(MinAfterSunset,Temperature)psi(.)
@@ -123,6 +132,7 @@ So how many sites predicted to be occupied? Recall there were 130 sites, and 96 
 ```{r}
 Naive = 96
 Psi = 130*mean(frogPsi_m2$Predicted)
+#number of sites where presence was missed
 Psi - Naive
 ```
 
@@ -153,9 +163,10 @@ fitstats <- function(fm) {
 ```{r warning=FALSE}
 load("Data/elkforheb.RData") ##loads functions chisq and Nocc used in parboot statistics
 
+#parametric bootstrap for fitted occupancy model. Simulates data based on fitted model and then refits the model and see how well it predicts
 pcru.pb <- parboot(ex_mod_p2, statistics = chisq, nsim = 50)
 pcru.pb
-plot(pcru.pb)
+plot(pcru.pb) #model adequately fits data
 
 
 pcru.pb <- parboot(ex_mod_p2, Nocc, nsim = 50)
@@ -228,6 +239,7 @@ summary(umf)
 ### Run models p
 
 ```{r}
+#univariate p models
 fm_p1 <- occu(~1 ~1, data=umf)
 #summary(fm_p1)
 fm_p2 <- occu(~d2road ~1, data=umf)
@@ -273,6 +285,7 @@ summary(top_p)
 ### Run models psi/p
 
 ```{r}
+#univariate models for psi holding detection model constant
 fm1=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~1, data=umf)
 fm2=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~northness, data=umf)
 fm3=occu(~protected3 + pplcat5 + tpi20 + camera +cc100~eastness, data=umf)
@@ -355,7 +368,10 @@ plot(pb)
 ### Best estimate of which site are occupied
 
 ```{r}
+#random effect predictions for each site
 ?ranef
+
+#using empirical bayes rule to backcalculate probability of occupancy at each site given detection probability. Distinguishing for 00000 sites
 
 ELKranef = ranef(top_fm)
 str(ELKranef)
@@ -382,6 +398,7 @@ Plot Estimated Occupancy:
 ```{r}
 ggplot(ELKoccu, aes(easting, northing, colour =ELKpsi, size = ELKpsi)) + geom_point()
 
+#best visual goodness of fit
 ggplot(ELKoccu, aes(easting, northing, colour =ELKpsi, size = as.factor(psinaive))) + geom_point()
 ```
 
@@ -467,7 +484,7 @@ Fit the occupancy model of Royle and Nichols (2003), which relates probability o
 
 ```{r}
 ?occuRN
-rn1<-occuRN(~1 ~1,blgr, K=150)
+rn1<-occuRN(~1 ~1,blgr, K=150) #K= uper limit of num individuals you could get at a site
 summary(rn1)
 ```
 
@@ -485,7 +502,7 @@ So the raw P is 0.22, the estimated N per site is 3.05, and there are 41 sites, 
 ### Empirical Bayes estimates of abundance at each site
 
 ```{r}
-re <- ranef(rn1)
+re <- ranef(rn1, K=150)
 plot(re)
 ebup <- bup(re, stat="mean")
 rn1EBUP <- sum(ebup)
@@ -521,6 +538,7 @@ summary(rn4)
 
 Detection as a function of time, abundance ~ Bq1 and Crop:
 ```{r}
+#can model covariate effects on relative abundance estimate
 rn5 <-occuRN(~time ~BQI.1.yes + Crop.history, blgr)
 summary(rn5)
 
@@ -545,7 +563,7 @@ N_rn3 <- predict(rn3, type = "state")
 str(N_rn3)
 hist(N_rn3$Predicted)
 
-re5 <- ranef(rn5)
+re5 <- ranef(rn5, K=150)
 plot(re5)
 ```
 
